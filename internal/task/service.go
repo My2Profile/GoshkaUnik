@@ -55,15 +55,13 @@ func (s *Service) ProcessTask(id int) (*Task, error) {
 		return nil, err
 	}
 
-	task.State = Pending
-
 	if err := task.transition(Processing); err != nil {
 		return nil, err
 	}
 
 	task.Result, err = s.process.Process(task.Input)
 	if err != nil {
-		task.transition(Pending)
+		task.State = Pending
 		return nil, fmt.Errorf("task %d: processing failed: %w", id, err)
 	}
 
