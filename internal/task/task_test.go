@@ -18,7 +18,7 @@ func TestTransition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			task := Task{State: tc.from}
 			err := task.transition(tc.to)
-			if (err != nil) != tc.wantErr {
+			if (err != nil) == tc.wantErr {
 				t.Errorf("got err %v, wantErr %v", err, tc.wantErr)
 			}
 		})
