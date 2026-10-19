@@ -153,6 +153,10 @@ func TestIndependentTasks(t *testing.T) {
 
 	task1, err := s.CreateTask("one two")
 
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
 	task2, err := s.CreateTask("alpha beta gamma")
 
 	if err != nil {
@@ -160,21 +164,30 @@ func TestIndependentTasks(t *testing.T) {
 	}
 
 	_, err = s.ProcessTask(task1.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if task2.State != Pending { // which state is a task that was never processed?
+		t.Errorf("task2 state: got %v, want %v", task2.State, Pending)
+	}
+	if task2.Result != nil { // no result yet: what value means "nothing"?
+		t.Errorf("task2 result: got %v, want nil", task2.Result)
 	}
 
+	// 3. task1 has its own result
+	if task1.Result.Words != 2 { // "one two" has how many words?
+		t.Errorf("task1 words: got %v, want %v", task1.Result.Words, 2)
+	}
+
+	// 4. now process task2
 	_, err = s.ProcessTask(task2.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if task1.State != Completed {
-		t.Errorf("got %v, want %v", task1.State, Completed)
+	if task2.Result.Words != 3 { // "alpha beta gamma"
+		t.Errorf("task2 words: got %v, want %v", task2.Result.Words, 3)
 	}
 
-	if task2.State != Completed && task2.Result != nil {
-		t.Errorf("got %v, want %v", task2.State, Completed)
+	// 5. and task1 must NOT have changed
+	if task1.Result.Words != 2 {
+		t.Errorf("task1 words changed: got %v, want %v", task1.Result.Words, 2)
 	}
 
 }
