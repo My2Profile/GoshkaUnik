@@ -1,0 +1,4 @@
+*.exe
+roomi-api/
+.kilo/
+.git.off/
