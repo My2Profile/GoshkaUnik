@@ -1,78 +1,96 @@
-# SIS - Checkpoint 1: Text Analyzer Tasks
+# SIS - Checkpoint 2: Concurrent Text Analyzer Tasks
 
-A small, synchronous, in-memory Go application. A **task** is one unit of
-work: a piece of text that gets analyzed. The program creates tasks, validates
-their input, processes them, stores the results, and tracks each task's state.
-Written for the Golang Application Development course (KBTU, Fall 2026).
+An in-memory Go service that analyzes text. A **task** is one piece of text.
+CP2 adds a **worker pool**: tasks are submitted to a bounded queue and processed
+concurrently by several workers, with safe shutdown.
+Golang Application Development course (KBTU, Fall 2026).
 
-## What it does
+## Result of a task
 
-Input: a text string, for example `"Hello Go world"`.
-Processing: text analysis. Result:
-
-| Field         | Meaning                                              |
-|---------------|------------------------------------------------------|
-| `Words`       | number of whitespace-separated words                 |
-| `Runes`       | number of characters (runes, not bytes)              |
-| `Lines`       | number of lines (count of `\n` plus one)             |
-| `UniqueWords` | number of distinct words, compared case-insensitively |
+| Field         | Meaning                                               |
+|---------------|-------------------------------------------------------|
+| `Words`       | whitespace-separated words                            |
+| `Runes`       | characters (runes, not bytes)                         |
+| `Lines`       | lines (count of `\n` plus one)                        |
+| `UniqueWords` | distinct words, case-insensitive                      |
 
 ## Project structure
 
 ```
-cmd/sis/main.go          small demo program
+cmd/sis/main.go          demo: start pool, submit tasks, shutdown, print results
 internal/task/
   errors.go              sentinel errors
-  task.go                Task, State, Result, state transition rules
+  task.go                Task, State, Result, transition rules, clone
   analyzer.go            Processor interface and TextAnalyzer
-  service.go             in-memory Service: create, get, process tasks
-  *_test.go              unit tests
+  service.go             Service: create/get/process, worker pool, Submit, Shutdown
+  *_test.go              unit and concurrency tests
 ```
 
 ## How to run
 
-Requires Go 1.27.
+Requires Go 1.27 (and gcc for the race detector on Windows).
 
 ```
 go run ./cmd/sis
-go test ./...
+go test ./... -race
 ```
 
 ## Task lifecycle
 
 ```
-Pending  ->  Processing  ->  Completed
+Pending -> Queued -> Processing -> Completed
+   ^         |            |
+   +---------+            +-----> Failed
 ```
 
-| From         | Allowed next state |
-|--------------|--------------------|
-| `Pending`    | `Processing`       |
-| `Processing` | `Completed`        |
-| `Completed`  | none (final)       |
+| From         | Allowed next        |
+|--------------|---------------------|
+| `Pending`    | `Queued`, `Processing` |
+| `Queued`     | `Processing`, `Pending` |
+| `Processing` | `Completed`, `Failed`  |
+| `Completed`, `Failed` | none (final)  |
 
-- A new task starts as `Pending` with no result.
-- `ProcessTask` moves it to `Processing`, runs the analyzer, stores the
-  result, then moves it to `Completed`.
-- Any other transition is rejected with `ErrInvalidTransition`. For example,
-  processing a `Completed` task again returns an error.
-- If the analyzer returns an error, the task goes back to `Pending` and the
-  error is returned.
+`Pending -> Processing` keeps the synchronous `ProcessTask` from CP1 working.
+`Queued -> Pending` is the roll-back when the queue is full.
+
+## Concurrency design
+
+- **Queue:** a buffered `chan int` of task IDs. Its capacity bounds the
+  backlog (backpressure). `Submit` never blocks: it uses `select` with
+  `default` and returns `ErrQueueFull` when the queue is full, rolling the
+  task back to `Pending`.
+- **Workers:** `Start(workers, queueSize)` launches goroutines that
+  `range` over the queue. Each worker calls `ProcessTask`.
+- **Synchronization:** one `sync.RWMutex` protects the task map and every
+  task. Writers take `Lock`, readers take `RLock`.
+- **No lock during processing:** `ProcessTask` has three phases - claim the
+  task under the lock (`Pending/Queued -> Processing`), run the `Processor`
+  with **no lock held** (so workers really overlap), then store the result
+  under the lock. Because the state change happens under the lock, two
+  workers can never process the same task.
+- **Snapshots:** `CreateTask`, `GetTaskByID` and `ProcessTask` return deep
+  copies (`clone`, including the `Result`), so callers never share memory
+  with the workers.
+- **Panic safety:** the `Processor` call is wrapped in `recover`. A panic
+  becomes an error, the task is marked `Failed` with the message, and the
+  worker keeps running.
+- **Shutdown:** sets `stopped` and closes the queue under the same mutex that
+  `Submit` uses (so nobody can send on a closed channel), then **releases the
+  lock** and waits on a `sync.WaitGroup` for all workers. Tasks already
+  queued are finished. It is idempotent. `Submit` after `Shutdown` returns
+  `ErrStopped`; `Submit` before `Start` returns `ErrNotStarted`.
 
 ## Errors
 
-Expected failures are returned as errors (no `panic`). They are wrapped with
-`%w`, so callers can use `errors.Is`:
+Wrapped with `%w`; use `errors.Is`:
 
-- `ErrEmptyInput` - the input is empty or only whitespace
-- `ErrNotFound` - no task with the requested ID
-- `ErrInvalidTransition` - the requested state change is not allowed
+`ErrEmptyInput`, `ErrNotFound`, `ErrInvalidTransition`, `ErrQueueFull`,
+`ErrStopped`, `ErrNotStarted`.
 
-## Design notes
+## Tests
 
-- `Processor` is an interface (`Process(input string) (*Result, error)`);
-  `TextAnalyzer` implements it, so other task domains could be plugged in.
-- Tasks are stored as `map[int]*Task`. Pointers are used so that state
-  changes made by the service persist in the map.
-- `Task.transition` has a pointer receiver because it modifies the task.
-- IDs come from a simple counter. The service is not safe for concurrent
-  use; concurrency is part of a later checkpoint.
+`go test ./... -race` covers: state transitions, analyzer cases (incl.
+Cyrillic), snapshot semantics, workers overlapping in time (gate processor),
+queue full + rollback, submit before start / after shutdown, idempotent
+shutdown, shutdown draining the queue, panic containment, and 50 goroutines
+using the service at once.

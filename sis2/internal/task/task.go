@@ -52,3 +52,13 @@ func (t *Task) transition(to State) error {
 	return nil
 
 }
+
+func (t *Task) clone() *Task {
+	cp := *t
+	if t.Result != nil {
+		r := *t.Result
+		cp.Result = &r
+	}
+
+	return &cp
+}
